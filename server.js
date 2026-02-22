@@ -238,12 +238,22 @@ async function searchNyaaForName(animeName, episode, season = 1) {
   if (episode != null) {
     const ep = parseInt(episode);
     const epPad = String(ep).padStart(2, '0');
-    filtered = allTorrents.filter(t => {
-      const name = t.name || '';
-      // Normalize name: replace separators with space for easier matching
+
+    function isBatch(name) {
+      // Detect batch/complete packs: "01-12", "01~28", "Complete", "S01 Batch", "Season 01"
+      if (/\bcomplete\b|\bbatch\b/i.test(name)) return true;
+      // Range like "01-12" or "01~28" or "01 - 28"
+      const rangeMatch = name.match(/(\d+)\s*[-~]\s*(\d+)/);
+      if (rangeMatch) {
+        const from = parseInt(rangeMatch[1]);
+        const to = parseInt(rangeMatch[2]);
+        if (to > from && ep >= from && ep <= to) return true;
+      }
+      return false;
+    }
+
+    function matchesEpisode(name) {
       const norm = name.replace(/[\[\]\(\)_.\-]/g, ' ').replace(/\s+/g, ' ');
-      // Look for episode number surrounded by spaces (handles " 01 ", " E01 ", " EP01 ")
-      // Pad to 2 digits for matching
       const normLower = norm.toLowerCase();
       const p = epPad;
       return normLower.includes(' ' + p + ' ')
@@ -252,6 +262,11 @@ async function searchNyaaForName(animeName, episode, season = 1) {
           || normLower.includes('ep' + p + ' ')
           || normLower.trimEnd().endsWith(' ' + p)
           || normLower.trimEnd().endsWith('e' + p);
+    }
+
+    filtered = filtered.filter(t => {
+      const name = t.name || '';
+      return matchesEpisode(name) || isBatch(name);
     });
   }
 
@@ -368,8 +383,13 @@ async function handleStreamRequest(type, fullId, rdKey) {
 
   console.log(`Resolved names: ${JSON.stringify(names)}`);
 
+  // For movies, search without episode number (films don't have episodes on Nyaa)
+  const isMovie = type === 'movie';
+  const searchEpisode = isMovie ? null : episode;
+  const searchSeason = isMovie ? null : season;
+
   // Search Nyaa across all name variants
-  const torrents = await searchNyaaAll(names, episode, season);
+  const torrents = await searchNyaaAll(names, searchEpisode, searchSeason);
   console.log(`Nyaa: total ${torrents.length} torrents after dedup`);
 
   if (!torrents.length) {
