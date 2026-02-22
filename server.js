@@ -108,24 +108,43 @@ async function getNamesFromIMDb(type, imdbId) {
       return { names: [name], year: null };
     }
 
-    // Prefer TV series over movies when type=series, prefer exact format match
+    // Find best AniList match: must have similar title to Cinemeta name
+    const nameLower = name.toLowerCase();
     const isSeriesRequest = type === 'series';
-    const best = mediaList.find(m =>
-      isSeriesRequest ? (m.format === 'TV' || m.format === 'TV_SHORT') : m.format === 'MOVIE'
-    ) || mediaList[0];
+
+    // Score each result by title similarity to Cinemeta name
+    const scored = mediaList.map(m => {
+      const titles = [m.title?.romaji, m.title?.english].filter(Boolean);
+      const score = titles.reduce((max, t) => {
+        const tLower = t.toLowerCase();
+        // Count matching words
+        const words = nameLower.split(/\s+/).filter(w => w.length > 2);
+        const matches = words.filter(w => tLower.includes(w)).length;
+        return Math.max(max, words.length ? matches / words.length : 0);
+      }, 0);
+      return { m, score };
+    });
+
+    // Pick best scoring match with correct format
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored.find(({ m, score }) =>
+      score > 0.3 && (isSeriesRequest ? (m.format === 'TV' || m.format === 'TV_SHORT') : m.format === 'MOVIE')
+    )?.m || scored[0]?.m || mediaList[0];
 
     console.log(`AniList: best match format=${best.format} title="${best.title?.romaji || best.title?.english}"`);
 
+    const anilistRomaji = best.title?.romaji;
+    const anilistEnglish = best.title?.english;
+
+    // Cinemeta name first (most specific, correct for S2+), AniList romaji as fallback
+    const validRomaji = anilistRomaji && isLatinScript(anilistRomaji) && !isJunkTitle(anilistRomaji) ? anilistRomaji : null;
     const names = [
-      best.title?.romaji,
-      best.title?.english,
-    ].filter(n => n && isLatinScript(n) && !isJunkTitle(n));
+      name,          // Cinemeta name - primary
+      validRomaji,   // AniList romaji - fallback only if Cinemeta finds nothing
+    ].filter(Boolean);
 
-    // Fallback: if filters removed everything, use the Cinemeta name directly
-    const finalNames = names.length ? names : [name];
-
-    console.log(`AniList: resolved names=${JSON.stringify(finalNames)} for "${name}"`);
-    return { names: [...new Set(finalNames)], year: best.startDate?.year || null };
+    console.log(`AniList: resolved names=${JSON.stringify([...new Set(names)])} for "${name}"`);
+    return { names: [...new Set(names)], year: best.startDate?.year || null };
   } catch (err) {
     console.error('IMDb→AniList error:', err.message);
     return { names: [], year: null };
@@ -293,32 +312,21 @@ async function searchNyaaForName(animeName, episode, season = 1) {
   return sorted;
 }
 
-// Search Nyaa: romaji first, fallback to english if nothing found
+// Search Nyaa: try all names in order, return first that has results
 async function searchNyaaAll(names, episode, season = 1) {
-  // names[0] = romaji, names[1] = english (from AniList/Kitsu order)
-  const romaji = names[0] || null;
-  const english = names[1] || null;
-
-  if (romaji) {
-    console.log(`Nyaa: Searching romaji "${romaji}" ep${episode} season${season}`);
-    const torrents = await searchNyaaForName(romaji, episode, season);
+  const tried = new Set();
+  for (const name of names) {
+    if (!name || tried.has(name)) continue;
+    tried.add(name);
+    console.log(`Nyaa: Searching "${name}" ep${episode} season${season}`);
+    const torrents = await searchNyaaForName(name, episode, season);
     if (torrents.length) {
-      console.log(`Nyaa: ✅ Found ${torrents.length} results with romaji`);
+      console.log(`Nyaa: ✅ Found ${torrents.length} results with "${name}"`);
       return torrents;
     }
-    console.log(`Nyaa: No results for romaji, trying english...`);
+    console.log(`Nyaa: No results for "${name}", trying next...`);
   }
-
-  if (english && english !== romaji) {
-    console.log(`Nyaa: Searching english "${english}" ep${episode} season${season}`);
-    const torrents = await searchNyaaForName(english, episode, season);
-    if (torrents.length) {
-      console.log(`Nyaa: ✅ Found ${torrents.length} results with english`);
-      return torrents;
-    }
-    console.log(`Nyaa: No results for english either`);
-  }
-
+  console.log(`Nyaa: No results for any name variant`);
   return [];
 }
 
