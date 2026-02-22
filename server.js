@@ -289,12 +289,6 @@ async function getRDStream(magnet, apiKey) {
   }
 }
 
-function preCacheRD(magnet, apiKey) {
-  if (!apiKey || apiKey === 'nord') return;
-  if (isCacheValid(rdCache.get(`rd:${magnet}_${apiKey}`), RD_CACHE_TTL)) return;
-  getRDStream(magnet, apiKey).catch(() => {});
-}
-
 // ============================================================
 // STREAM HANDLER
 // ============================================================
@@ -322,12 +316,11 @@ async function handleStreamRequest(type, fullId, rdKey) {
 
   const hasRD = rdKey && rdKey !== 'nord';
 
+  // Show all found torrents - RD conversion happens ONLY when user clicks a specific stream
   const streams = torrents.filter(t => t.magnet).slice(0, 10).map(t => {
     if (hasRD) {
-      preCacheRD(t.magnet, rdKey);
-      const isReady = isCacheValid(rdCache.get(`rd:${t.magnet}_${rdKey}`), RD_CACHE_TTL);
       return {
-        name: isReady ? '🎌 RealDebrid ✅' : '🎌 RealDebrid',
+        name: '🎌 RealDebrid',
         title: `${t.name}\n👥 ${t.seeders || 0} seeders | 📦 ${t.filesize || '?'}`,
         url: `${BASE_URL}/${rdKey}/rd/${encodeURIComponent(t.magnet)}`,
         behaviorHints: { bingeGroup: 'anime-nyaa-rd' }
