@@ -183,26 +183,19 @@ function parseEpisode(fullId) {
 // NYAA SEARCH
 // ============================================================
 function buildSearchVariants(animeName, episode) {
-  const clean = (n) => n
+  // Clean: remove season/part tags and colons
+  const clean = animeName
     .replace(/Season \d+/i, '').replace(/Part \d+/i, '')
-    .replace(/2nd Season/i, '').replace(/3rd Season/i, '')
+    .replace(/2nd Season|3rd Season/i, '')
     .replace(/\([^)]*\)/g, '').replace(/:/g, '').trim();
 
-  const base = [
-    animeName,
-    clean(animeName),
-    animeName.split(':')[0].trim(),
-    animeName.split('-')[0].trim(),
-    animeName.replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim(),
-  ];
-  const unique = [...new Set(base.filter(Boolean))];
+  const base = [...new Set([animeName, clean].filter(Boolean))];
 
   if (episode != null) {
     const epPad = String(episode).padStart(2, '0');
-    const epRaw = String(episode);
-    return unique.flatMap(n => [`${n} ${epPad}`, `${n} ${epRaw}`]);
+    return base.flatMap(n => [`${n} ${epPad}`, `${n} ${String(episode)}`]);
   }
-  return unique;
+  return base;
 }
 
 async function searchNyaaForName(animeName, episode) {
@@ -248,25 +241,33 @@ async function searchNyaaForName(animeName, episode) {
   return sorted;
 }
 
-// Search Nyaa across multiple name variants in parallel
+// Search Nyaa: romaji first, fallback to english if nothing found
 async function searchNyaaAll(names, episode) {
-  console.log(`Nyaa: Searching ${names.length} name variants: ${names.slice(0, 3).join(', ')}`);
+  // names[0] = romaji, names[1] = english (from AniList/Kitsu order)
+  const romaji = names[0] || null;
+  const english = names[1] || null;
 
-  const results = await Promise.allSettled(
-    names.map(name => searchNyaaForName(name, episode))
-  );
-
-  const seen = new Set();
-  const combined = [];
-  for (const r of results) {
-    if (r.status !== 'fulfilled') continue;
-    for (const t of r.value) {
-      const hash = t.magnet?.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase();
-      if (hash && !seen.has(hash)) { seen.add(hash); combined.push(t); }
+  if (romaji) {
+    console.log(`Nyaa: Searching romaji "${romaji}" ep${episode}`);
+    const torrents = await searchNyaaForName(romaji, episode);
+    if (torrents.length) {
+      console.log(`Nyaa: ✅ Found ${torrents.length} results with romaji`);
+      return torrents;
     }
+    console.log(`Nyaa: No results for romaji, trying english...`);
   }
 
-  return combined.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
+  if (english && english !== romaji) {
+    console.log(`Nyaa: Searching english "${english}" ep${episode}`);
+    const torrents = await searchNyaaForName(english, episode);
+    if (torrents.length) {
+      console.log(`Nyaa: ✅ Found ${torrents.length} results with english`);
+      return torrents;
+    }
+    console.log(`Nyaa: No results for english either`);
+  }
+
+  return [];
 }
 
 // ============================================================
@@ -341,7 +342,7 @@ async function handleStreamRequest(type, fullId, rdKey) {
   const hasRD = rdKey && rdKey !== 'nord';
 
   // Show all found torrents - RD conversion happens ONLY when user clicks a specific stream
-  const streams = torrents.filter(t => t.magnet).map(t => {
+  const streams = torrents.filter(t => t.magnet && (t.seeders || 0) > 0).map(t => {
     // Detect if torrent title matches S1 pattern (no season number = season 1)
     const name = t.name || '';
     const hasSeasonTag = /S\d{2}|Season\s*\d/i.test(name);
