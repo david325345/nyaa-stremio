@@ -592,6 +592,8 @@ function serveLoadingVideo(res) {
   return res.redirect(302, LOADING_VIDEO_URL);
 }
 
+const RD_QUICK_TIMEOUT = 8000; // Wait up to 8s on first attempt before showing loading video
+
 app.get('/:rdKey/play/:magnet(*)/video.mp4', async (req, res) => {
   const rdKey = req.params.rdKey;
   const magnet = decodeURIComponent(req.params.magnet);
@@ -604,23 +606,34 @@ app.get('/:rdKey/play/:magnet(*)/video.mp4', async (req, res) => {
     return res.redirect(302, cached.url);
   }
 
-  // 2. RD conversion already in progress → serve loading video immediately
+  // 2. RD conversion already running in background → loading video
   if (rdInProgress.has(cacheKey)) {
     console.log('[Play] 🕐 RD in progress → loading video');
     return serveLoadingVideo(res);
   }
 
-  // 3. Start RD conversion in background, serve loading video immediately
-  console.log('[Play] 🚀 Starting RD conversion in background...');
+  // 3. First attempt: race RD against timeout
+  console.log(`[Play] 🚀 First attempt, waiting up to ${RD_QUICK_TIMEOUT/1000}s...`);
   rdInProgress.add(cacheKey);
+
+  const rdPromise = getRDStream(magnet, rdKey);
+  const timeoutPromise = new Promise(resolve => setTimeout(() => resolve(null), RD_QUICK_TIMEOUT));
+
+  const url = await Promise.race([rdPromise, timeoutPromise]);
+
+  if (url) {
+    rdInProgress.delete(cacheKey);
+    console.log('[Play] ✅ RD ready → redirect');
+    return res.redirect(302, url);
+  }
+
+  // Timed out or failed → serve loading video, keep RD running in background
+  console.log('[Play] ⏱️  Timeout → loading video, RD continues in background');
   serveLoadingVideo(res);
 
-  // Background processing (don't await - response already sent)
-  getRDStream(magnet, rdKey)
-    .then(url => {
-      if (url) console.log('[Play] ✅ RD ready, cached for next request');
-      else console.log('[Play] ⚠️  RD conversion failed or still downloading');
-    })
+  // Continue waiting for RD in background so next request gets cache hit
+  rdPromise
+    .then(u => { if (u) console.log('[Play] ✅ RD finished in background, cached'); })
     .catch(err => console.error('[Play] RD background error:', err.message))
     .finally(() => rdInProgress.delete(cacheKey));
 });
