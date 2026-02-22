@@ -525,6 +525,7 @@ app.get('/:rdKey/manifest.json', (req, res) => {
     version: '3.0.0',
     name: '🎌 Anime Nyaa',
     description: 'Streamuje anime z Nyaa.si přes RealDebrid. Funguje s Cinemeta/Kitsu katalogy.',
+    logo: `${BASE_URL}/logo.png`,
     resources: ['stream'],
     types: ['series', 'movie'],
     catalogs: [],
