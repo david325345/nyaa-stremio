@@ -580,26 +580,49 @@ app.get('/:rdKey/rd/:magnet(*)', async (req, res) => {
 // ── PLAY PROXY ────────────────────────────────────────────
 // If RD stream is ready → redirect to it
 // If not ready → serve loading video
-app.get('/:rdKey/play/:magnet(*)/video.mp4', async (req, res) => {
-  const rdKey = req.params.rdKey;
-  const magnet = decodeURIComponent(req.params.magnet);
-  console.log('▶️  Play request for magnet...');
+// Track in-progress RD conversions to avoid duplicate parallel calls
+const rdInProgress = new Set();
 
-  const streamUrl = await getRDStream(magnet, rdKey);
-  if (streamUrl) {
-    console.log('[Play] ✅ Redirect to RD stream');
-    return res.redirect(302, streamUrl);
-  }
-
-  // Not ready yet → serve loading video
-  console.log('[Play] 🕐 Not ready → serving loading video');
+function serveLoadingVideo(res) {
   if (fs.existsSync(LOADING_VIDEO_PATH)) {
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Length', fs.statSync(LOADING_VIDEO_PATH).size);
     return fs.createReadStream(LOADING_VIDEO_PATH).pipe(res);
   }
-  // Fallback: redirect to GitHub raw if local file not available
   return res.redirect(302, LOADING_VIDEO_URL);
+}
+
+app.get('/:rdKey/play/:magnet(*)/video.mp4', async (req, res) => {
+  const rdKey = req.params.rdKey;
+  const magnet = decodeURIComponent(req.params.magnet);
+  const cacheKey = `rd:${magnet}_${rdKey}`;
+
+  // 1. Already cached → instant redirect
+  const cached = rdCache.get(cacheKey);
+  if (cached && isCacheValid(cached, RD_CACHE_TTL)) {
+    console.log('[Play] ✅ Cache hit → redirect');
+    return res.redirect(302, cached.url);
+  }
+
+  // 2. RD conversion already in progress → serve loading video immediately
+  if (rdInProgress.has(cacheKey)) {
+    console.log('[Play] 🕐 RD in progress → loading video');
+    return serveLoadingVideo(res);
+  }
+
+  // 3. Start RD conversion in background, serve loading video immediately
+  console.log('[Play] 🚀 Starting RD conversion in background...');
+  rdInProgress.add(cacheKey);
+  serveLoadingVideo(res);
+
+  // Background processing (don't await - response already sent)
+  getRDStream(magnet, rdKey)
+    .then(url => {
+      if (url) console.log('[Play] ✅ RD ready, cached for next request');
+      else console.log('[Play] ⚠️  RD conversion failed or still downloading');
+    })
+    .catch(err => console.error('[Play] RD background error:', err.message))
+    .finally(() => rdInProgress.delete(cacheKey));
 });
 
 // Clear name cache on startup (filters may have changed between deploys)
