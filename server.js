@@ -1,4 +1,20 @@
 const axios = require('axios');
+const fs = require('fs');
+
+// Loading video - downloaded from GitHub once at startup, served locally
+const LOADING_VIDEO_PATH = '/tmp/downloading.mp4';
+const LOADING_VIDEO_URL = 'https://raw.githubusercontent.com/david325345/nyaa-stremio/main/public/downloading.mp4';
+
+async function downloadLoadingVideo() {
+  try {
+    const r = await axios.get(LOADING_VIDEO_URL, { responseType: 'arraybuffer', timeout: 15000 });
+    fs.writeFileSync(LOADING_VIDEO_PATH, Buffer.from(r.data));
+    console.log(`✅ Loading video downloaded (${Math.round(r.data.byteLength / 1024)}KB)`);
+  } catch (e) {
+    console.log('⚠️  Could not download loading video:', e.message);
+  }
+}
+downloadLoadingVideo();
 const express = require('express');
 const path = require('path');
 const { si } = require('nyaapi');
@@ -474,11 +490,12 @@ async function handleStreamRequest(type, fullId, rdKey) {
     const title = `${t.name}${seasonHint}\n👥 ${t.seeders || 0} seeders | 📦 ${t.filesize || '?'}`;
 
     if (hasRD) {
+      const magnetEnc = encodeURIComponent(t.magnet);
       return {
         name: '🎌 RealDebrid',
         title,
-        url: `${BASE_URL}/${rdKey}/rd/${encodeURIComponent(t.magnet)}`,
-        behaviorHints: { bingeGroup: 'anime-nyaa-rd' }
+        url: `${BASE_URL}/${rdKey}/play/${magnetEnc}/video.mp4`,
+        behaviorHints: { bingeGroup: 'anime-nyaa-rd', notWebReady: true }
       };
     }
     return {
@@ -551,13 +568,38 @@ app.get(/^\/([^\/]+)\/stream\/([^\/]+)\/(.+)\.json$/, async (req, res) => {
   }
 });
 
-// ── REALDEBRID PROXY ──────────────────────────────────────
+// ── REALDEBRID PROXY (legacy) ─────────────────────────────
 app.get('/:rdKey/rd/:magnet(*)', async (req, res) => {
   const rdKey = req.params.rdKey;
   const magnet = decodeURIComponent(req.params.magnet);
   console.log('RD proxy: converting magnet...');
   const stream = await getRDStream(magnet, rdKey);
-  stream ? res.redirect(stream) : res.status(500).send('RealDebrid: Failed');
+  stream ? res.redirect(302, stream) : res.status(500).send('RealDebrid: Failed');
+});
+
+// ── PLAY PROXY ────────────────────────────────────────────
+// If RD stream is ready → redirect to it
+// If not ready → serve loading video
+app.get('/:rdKey/play/:magnet(*)/video.mp4', async (req, res) => {
+  const rdKey = req.params.rdKey;
+  const magnet = decodeURIComponent(req.params.magnet);
+  console.log('▶️  Play request for magnet...');
+
+  const streamUrl = await getRDStream(magnet, rdKey);
+  if (streamUrl) {
+    console.log('[Play] ✅ Redirect to RD stream');
+    return res.redirect(302, streamUrl);
+  }
+
+  // Not ready yet → serve loading video
+  console.log('[Play] 🕐 Not ready → serving loading video');
+  if (fs.existsSync(LOADING_VIDEO_PATH)) {
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Length', fs.statSync(LOADING_VIDEO_PATH).size);
+    return fs.createReadStream(LOADING_VIDEO_PATH).pipe(res);
+  }
+  // Fallback: redirect to GitHub raw if local file not available
+  return res.redirect(302, LOADING_VIDEO_URL);
 });
 
 // Clear name cache on startup (filters may have changed between deploys)
