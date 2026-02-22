@@ -241,15 +241,10 @@ async function searchNyaaForName(animeName, episode, season = 1) {
       // Must contain the episode number in a recognizable pattern
       // Matches: " - 03", "[03]", "E03", "EP03", " 03 ", "_03_" etc.
       // V2/V3 versions: "03v2", "03V3" are still ep 03
-      const epPattern = new RegExp(
-        `(?:[-_\s\[\(E]|ep)0*${ep}(?:v\d)?(?:[\s\-_\]\)\.v]|$)`,
-        'i'
-      );
-      // Also accept zero-padded version
-      const epPadPattern = new RegExp(
-        `(?:[-_\s\[\(E]|ep)${epPad}(?:v\d)?(?:[\s\-_\]\)\.v]|$)`,
-        'i'
-      );
+      const sep = '(?:[-_ \\[\\(E]|ep)';
+      const end = '(?:v\\d)?(?:[ \\-_.\\]\\)]|$)';
+      const epPattern = new RegExp(sep + '0*' + ep + end, 'i');
+      const epPadPattern = new RegExp(sep + epPad + end, 'i');
       return epPattern.test(name) || epPadPattern.test(name);
     });
   }
