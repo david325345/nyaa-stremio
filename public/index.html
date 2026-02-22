@@ -567,11 +567,10 @@
         return;
       }
 
-      const config = { rdKey: noRd ? 'nord' : key };
-      const configB64 = btoa(JSON.stringify(config));
+      const rdKey = noRd ? 'nord' : key;
       const host = window.location.host;
       const protocol = window.location.protocol;
-      const manifestUrl = `${protocol}//${host}/${configB64}/manifest.json`;
+      const manifestUrl = `${protocol}//${host}/${rdKey}/manifest.json`;
 
       document.getElementById('manifestUrl').textContent = manifestUrl;
 
