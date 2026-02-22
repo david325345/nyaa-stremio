@@ -14,11 +14,8 @@ console.log('  BASE_URL:', BASE_URL);
 // ============================================================
 // CACHES
 // ============================================================
-const anilistSearchCache = new Map();
-const ANILIST_CACHE_TTL = 10 * 60 * 1000;
-
-const anilistDetailsCache = new Map();
-const ANILIST_DETAILS_TTL = 30 * 60 * 1000;
+const nameCache = new Map();       // kitsu/imdb ID → { names[], year }
+const NAME_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h - names don't change
 
 const nyaaCache = new Map();
 const NYAA_CACHE_TTL = 30 * 60 * 1000;
@@ -32,86 +29,134 @@ function isCacheValid(entry, ttl) {
 
 cron.schedule('*/30 * * * *', () => {
   const now = Date.now();
-  for (const [k, v] of anilistSearchCache) if (now - v.timestamp > ANILIST_CACHE_TTL) anilistSearchCache.delete(k);
-  for (const [k, v] of anilistDetailsCache) if (now - v.timestamp > ANILIST_DETAILS_TTL) anilistDetailsCache.delete(k);
+  for (const [k, v] of nameCache) if (now - v.timestamp > NAME_CACHE_TTL) nameCache.delete(k);
   for (const [k, v] of nyaaCache) if (now - v.timestamp > NYAA_CACHE_TTL) nyaaCache.delete(k);
   for (const [k, v] of rdCache) if (now - v.timestamp > RD_CACHE_TTL) rdCache.delete(k);
   console.log('🗑️  Cache cleanup done');
 });
 
 // ============================================================
-// ANILIST API
+// ANIME OFFLINE DATABASE (IMDb → MAL mapping)
 // ============================================================
-const ANILIST_URL = 'https://graphql.anilist.co';
+// ============================================================
+// NAME RESOLVERS
+// ============================================================
 
-async function searchAniList(query) {
-  const cacheKey = `search:${query}`;
-  const cached = anilistSearchCache.get(cacheKey);
-  if (isCacheValid(cached, ANILIST_CACHE_TTL)) {
-    console.log(`AniList: ✅ Cache hit for "${query}"`);
+// Kitsu ID → names
+async function getNamesFromKitsu(kitsuId) {
+  try {
+    const res = await axios.get(`https://kitsu.io/api/edge/anime/${kitsuId}`, { timeout: 8000 });
+    const attrs = res.data?.data?.attributes;
+    if (!attrs) return { names: [], year: null };
+
+    const names = [];
+    if (attrs.canonicalTitle) names.push(attrs.canonicalTitle);
+    if (attrs.titles?.en) names.push(attrs.titles.en);
+    if (attrs.titles?.en_jp) names.push(attrs.titles.en_jp);
+    if (attrs.titles?.ja_jp) names.push(attrs.titles.ja_jp);
+    if (attrs.abbreviatedTitles) names.push(...attrs.abbreviatedTitles);
+
+    const year = attrs.startDate ? parseInt(attrs.startDate.substring(0, 4)) : null;
+    console.log(`Kitsu: names=${JSON.stringify(names)} year=${year}`);
+    return { names: [...new Set(names.filter(Boolean))], year };
+  } catch (err) {
+    console.error('Kitsu error:', err.message);
+    return { names: [], year: null };
+  }
+}
+
+// IMDb ID → Cinemeta (get English name) → AniList (get all title variants)
+async function getNamesFromIMDb(type, imdbId) {
+  try {
+    // Step 1: get English name from Cinemeta
+    const res = await axios.get(`https://v3-cinemeta.strem.io/meta/${type}/${imdbId}.json`, { timeout: 8000 });
+    const name = res.data?.meta?.name;
+    if (!name) { console.log(`Cinemeta: no name for ${imdbId}`); return { names: [], year: null }; }
+    console.log(`Cinemeta: "${name}" for ${imdbId}`);
+
+    // Step 2: search AniList with that name to get romaji + all variants
+    const gql = `
+      query ($search: String) {
+        Page(page: 1, perPage: 5) {
+          media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+            title { romaji english native }
+            synonyms
+            startDate { year }
+          }
+        }
+      }
+    `;
+    const aRes = await axios.post('https://graphql.anilist.co',
+      { query: gql, variables: { search: name } }, { timeout: 8000 });
+
+    const mediaList = aRes.data?.data?.Page?.media || [];
+    if (!mediaList.length) {
+      console.log(`AniList: no results for "${name}", using Cinemeta name only`);
+      return { names: [name], year: null };
+    }
+
+    const best = mediaList[0];
+    const names = [
+      best.title?.romaji,
+      best.title?.english,
+      name,
+      ...(best.synonyms || [])
+    ].filter(Boolean);
+
+    console.log(`AniList: resolved ${names.length} name variants for "${name}"`);
+    return { names: [...new Set(names)], year: best.startDate?.year || null };
+  } catch (err) {
+    console.error('IMDb→AniList error:', err.message);
+    return { names: [], year: null };
+  }
+}
+
+
+// Master resolver: given full Stremio ID → anime names
+async function resolveAnimeNames(type, fullId) {
+  const cacheKey = `names:${type}:${fullId}`;
+  const cached = nameCache.get(cacheKey);
+  if (isCacheValid(cached, NAME_CACHE_TTL)) {
+    console.log(`Names: ✅ Cache hit for ${fullId}`);
     return cached.data;
   }
 
-  const gql = `
-    query ($search: String) {
-      Page(page: 1, perPage: 30) {
-        media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
-          id type format
-          title { romaji english native }
-          coverImage { extraLarge large }
-          bannerImage description genres
-          averageScore episodes status season seasonYear
-        }
-      }
-    }
-  `;
+  const baseId = fullId.split(':')[0]; // e.g. "kitsu:12345:1" → "kitsu"
 
-  try {
-    const res = await axios.post(ANILIST_URL, { query: gql, variables: { search: query } }, { timeout: 8000 });
-    const data = res.data?.data?.Page?.media || [];
-    anilistSearchCache.set(cacheKey, { data, timestamp: Date.now() });
-    console.log(`AniList: 🔍 Found ${data.length} results for "${query}"`);
-    return data;
-  } catch (err) {
-    console.error('AniList search error:', err.message);
-    return [];
+  let result = { names: [], year: null };
+
+  if (fullId.startsWith('kitsu:')) {
+    const kitsuId = fullId.split(':')[1];
+    result = await getNamesFromKitsu(kitsuId);
+  } else if (fullId.startsWith('tt')) {
+    const imdbId = baseId;
+    result = await getNamesFromIMDb(type, imdbId);
+  } else {
+    // Unknown prefix - try Cinemeta → AniList
+    result = await getNamesFromIMDb(type, baseId);
   }
-}
 
-async function getAniListDetails(anilistId) {
-  const key = String(anilistId);
-  const cached = anilistDetailsCache.get(key);
-  if (isCacheValid(cached, ANILIST_DETAILS_TTL)) return cached.data;
-
-  const gql = `
-    query ($id: Int) {
-      Media(id: $id, type: ANIME) {
-        id type format
-        title { romaji english native }
-        coverImage { extraLarge large }
-        bannerImage description genres
-        averageScore episodes status season seasonYear
-      }
-    }
-  `;
-
-  try {
-    const res = await axios.post(ANILIST_URL, { query: gql, variables: { id: parseInt(anilistId) } }, { timeout: 8000 });
-    const data = res.data?.data?.Media || null;
-    if (data) anilistDetailsCache.set(key, { data, timestamp: Date.now() });
-    return data;
-  } catch (err) {
-    console.error('AniList details error:', err.message);
-    return null;
+  if (result.names.length) {
+    nameCache.set(cacheKey, { data: result, timestamp: Date.now() });
   }
+  return result;
 }
 
-function getStremioType(media) {
-  return (media.format === 'MOVIE' || media.format === 'SPECIAL') ? 'movie' : 'series';
-}
-
-function getBestTitle(title) {
-  return title.romaji || title.english || title.native || 'Unknown';
+// Parse episode number from Stremio ID
+// kitsu:12345:5 → episode 5
+// tt1234567:1:5 → season 1 episode 5
+// tt1234567:5 → episode 5
+function parseEpisode(fullId) {
+  const parts = fullId.split(':');
+  if (fullId.startsWith('kitsu:')) {
+    // kitsu:ID:episode
+    return parseInt(parts[2]) || 1;
+  } else {
+    // tt:season:episode  OR  tt:episode
+    if (parts.length >= 3) return parseInt(parts[parts.length - 1]) || 1;
+    if (parts.length === 2) return parseInt(parts[1]) || 1;
+    return 1;
+  }
 }
 
 // ============================================================
@@ -140,8 +185,8 @@ function buildSearchVariants(animeName, episode) {
   return unique;
 }
 
-async function searchNyaa(animeName, episode) {
-  const cacheKey = `${animeName}:${episode}`;
+async function searchNyaaForName(animeName, episode) {
+  const cacheKey = `nyaa:${animeName}:${episode}`;
   const cached = nyaaCache.get(cacheKey);
   if (isCacheValid(cached, NYAA_CACHE_TTL)) {
     console.log(`Nyaa: ✅ Cache hit "${animeName}" ep${episode}`);
@@ -149,7 +194,7 @@ async function searchNyaa(animeName, episode) {
   }
 
   const variants = buildSearchVariants(animeName, episode);
-  console.log(`Nyaa: 🔍 ${variants.length} variants parallel for "${animeName}" ep${episode}`);
+  console.log(`Nyaa: 🔍 ${variants.length} variants for "${animeName}" ep${episode}`);
 
   const seenHashes = new Set();
   const allTorrents = [];
@@ -176,9 +221,29 @@ async function searchNyaa(animeName, episode) {
   }
 
   const sorted = filtered.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
-  console.log(`Nyaa: ✅ ${sorted.length} torrents (from ${allTorrents.length} total)`);
   nyaaCache.set(cacheKey, { data: sorted, timestamp: Date.now() });
   return sorted;
+}
+
+// Search Nyaa across multiple name variants in parallel
+async function searchNyaaAll(names, episode) {
+  console.log(`Nyaa: Searching ${names.length} name variants: ${names.slice(0, 3).join(', ')}`);
+
+  const results = await Promise.allSettled(
+    names.slice(0, 4).map(name => searchNyaaForName(name, episode)) // top 4 names
+  );
+
+  const seen = new Set();
+  const combined = [];
+  for (const r of results) {
+    if (r.status !== 'fulfilled') continue;
+    for (const t of r.value) {
+      const hash = t.magnet?.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase();
+      if (hash && !seen.has(hash)) { seen.add(hash); combined.push(t); }
+    }
+  }
+
+  return combined.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
 }
 
 // ============================================================
@@ -187,14 +252,13 @@ async function searchNyaa(animeName, episode) {
 async function getRDStream(magnet, apiKey) {
   if (!apiKey || apiKey === 'nord') return null;
 
-  const cacheKey = `${magnet}_${apiKey}`;
+  const cacheKey = `rd:${magnet}_${apiKey}`;
   const cached = rdCache.get(cacheKey);
   if (isCacheValid(cached, RD_CACHE_TTL)) { console.log('RD: ✅ Cache hit'); return cached.url; }
 
   const headers = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/x-www-form-urlencoded' };
 
   try {
-    console.log('RD: Adding magnet...');
     const add = await axios.post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet',
       `magnet=${encodeURIComponent(magnet)}`, { headers, timeout: 12000 });
     const torrentId = add.data?.id;
@@ -227,159 +291,57 @@ async function getRDStream(magnet, apiKey) {
 
 function preCacheRD(magnet, apiKey) {
   if (!apiKey || apiKey === 'nord') return;
-  if (isCacheValid(rdCache.get(`${magnet}_${apiKey}`), RD_CACHE_TTL)) return;
+  if (isCacheValid(rdCache.get(`rd:${magnet}_${apiKey}`), RD_CACHE_TTL)) return;
   getRDStream(magnet, apiKey).catch(() => {});
 }
 
 // ============================================================
-// HANDLERS
+// STREAM HANDLER
 // ============================================================
-async function handleCatalogRequest(args) {
-  const { type, extra } = args;
-  const search = extra?.search || null;
-  const skip = parseInt(extra?.skip) || 0;
+async function handleStreamRequest(type, fullId, rdKey) {
+  console.log(`=== STREAM REQUEST === type=${type} id=${fullId}`);
 
-  console.log(`=== CATALOG REQUEST === type=${type} search="${search}" skip=${skip}`);
+  const episode = parseEpisode(fullId);
+  console.log(`Parsed episode: ${episode}`);
 
-  if (skip > 0) return { metas: [] };
-  if (!search || !search.trim()) return { metas: [] };
-
-  try {
-    const results = await searchAniList(search.trim());
-    const metas = results
-      .filter(m => getStremioType(m) === type)
-      .map(m => ({
-        id: `anilist:${m.id}`,
-        type: getStremioType(m),
-        name: getBestTitle(m.title),
-        poster: m.coverImage?.extraLarge || m.coverImage?.large || '',
-        background: m.bannerImage || m.coverImage?.extraLarge || '',
-        description: (m.description || '').replace(/<[^>]*>/g, ''),
-        genres: m.genres || [],
-        releaseInfo: [m.season, m.seasonYear].filter(Boolean).join(' ') || undefined,
-        imdbRating: m.averageScore ? (m.averageScore / 10).toFixed(1) : undefined
-      }));
-    console.log(`📋 Returning ${metas.length} metas`);
-    return { metas };
-  } catch (err) {
-    console.error('Catalog error:', err.message);
-    return { metas: [] };
+  // Resolve anime names from ID
+  const { names, year } = await resolveAnimeNames(type, fullId);
+  if (!names.length) {
+    console.log('Could not resolve anime names');
+    return { streams: [{ name: '❌ Nenalezeno', title: 'Nepodařilo se najít název anime', url: 'https://nyaa.si', behaviorHints: { notWebReady: true } }] };
   }
-}
 
-async function handleMetaRequest(args) {
-  const { id } = args;
-  // id = "anilist:12345"
-  const match = id.match(/^anilist:(\d+)$/);
-  if (!match) return { meta: null };
-  const anilistId = match[1];
+  console.log(`Resolved names: ${JSON.stringify(names)}`);
 
-  console.log(`=== META REQUEST === id=${id}`);
+  // Search Nyaa across all name variants
+  const torrents = await searchNyaaAll(names, episode);
 
-  try {
-    const media = await getAniListDetails(anilistId);
-    if (!media) return { meta: null };
-
-    const type = getStremioType(media);
-    const title = getBestTitle(media.title);
-    const poster = media.coverImage?.extraLarge || media.coverImage?.large || '';
-    const background = media.bannerImage || poster;
-    const totalEpisodes = media.episodes || 1;
-
-    const meta = {
-      id: `anilist:${media.id}`,
-      type,
-      name: title,
-      poster,
-      background,
-      description: (media.description || '').replace(/<[^>]*>/g, ''),
-      genres: media.genres || [],
-      releaseInfo: [media.season, media.seasonYear].filter(Boolean).join(' ') || String(media.seasonYear || ''),
-      imdbRating: media.averageScore ? (media.averageScore / 10).toFixed(1) : undefined
-    };
-
-    if (type === 'series') {
-      meta.videos = Array.from({ length: totalEpisodes }, (_, i) => ({
-        id: `anilist:${media.id}:${i + 1}`,
-        title: `Epizoda ${i + 1}`,
-        episode: i + 1,
-        season: 1,
-        released: new Date(0).toISOString()
-      }));
-    } else {
-      meta.videos = [{ id: `anilist:${media.id}:1`, title, episode: 1, season: 1, released: new Date(0).toISOString() }];
-    }
-
-    return { meta };
-  } catch (err) {
-    console.error('Meta error:', err.message);
-    return { meta: null };
+  if (!torrents.length) {
+    return { streams: [{ name: '⏳ Nenalezeno', title: `Ep ${episode} není na Nyaa.si\n${names[0]}`, url: 'https://nyaa.si', behaviorHints: { notWebReady: true } }] };
   }
-}
 
-async function handleStreamRequest(args) {
-  const { id, config } = args;
-  const rdKey = config?.rdKey || 'nord';
+  const hasRD = rdKey && rdKey !== 'nord';
 
-  // id = "anilist:12345:1"
-  const match = id.match(/^anilist:(\d+):(\d+)$/);
-  if (!match) return { streams: [] };
-  const anilistId = match[1];
-  const episode = parseInt(match[2]) || 1;
-
-  console.log(`=== STREAM REQUEST === id=${id} episode=${episode}`);
-
-  try {
-    const media = await getAniListDetails(anilistId);
-    if (!media) return { streams: [] };
-
-    const titleRomaji = media.title.romaji;
-    const titleEnglish = media.title.english;
-    const isMovie = getStremioType(media) === 'movie';
-    const ep = isMovie ? null : episode;
-
-    let torrents = [];
-    if (titleRomaji && titleEnglish && titleRomaji !== titleEnglish) {
-      const [r1, r2] = await Promise.all([searchNyaa(titleRomaji, ep), searchNyaa(titleEnglish, ep)]);
-      const seen = new Set();
-      for (const t of [...r1, ...r2]) {
-        const hash = t.magnet?.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase();
-        if (hash && !seen.has(hash)) { seen.add(hash); torrents.push(t); }
-      }
-      torrents.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
-    } else {
-      torrents = await searchNyaa(titleRomaji || titleEnglish || '', ep);
-    }
-
-    if (!torrents.length) {
-      return { streams: [{ name: '⏳ Nenalezeno', title: `Ep ${episode} není na Nyaa.si`, url: 'https://nyaa.si', behaviorHints: { notWebReady: true } }] };
-    }
-
-    const hasRD = rdKey && rdKey !== 'nord';
-    const streams = torrents.filter(t => t.magnet).slice(0, 10).map(t => {
-      if (hasRD) {
-        preCacheRD(t.magnet, rdKey);
-        const isReady = isCacheValid(rdCache.get(`${t.magnet}_${rdKey}`), RD_CACHE_TTL);
-        return {
-          name: isReady ? '🎌 RealDebrid ✅' : '🎌 RealDebrid',
-          title: `${t.name}\n👥 ${t.seeders || 0} seeders | 📦 ${t.filesize || '?'}`,
-          url: `${BASE_URL}/${rdKey}/rd/${encodeURIComponent(t.magnet)}`,
-          behaviorHints: { bingeGroup: 'anime-rd' }
-        };
-      }
+  const streams = torrents.filter(t => t.magnet).slice(0, 10).map(t => {
+    if (hasRD) {
+      preCacheRD(t.magnet, rdKey);
+      const isReady = isCacheValid(rdCache.get(`rd:${t.magnet}_${rdKey}`), RD_CACHE_TTL);
       return {
-        name: '🧲 Magnet',
+        name: isReady ? '🎌 RealDebrid ✅' : '🎌 RealDebrid',
         title: `${t.name}\n👥 ${t.seeders || 0} seeders | 📦 ${t.filesize || '?'}`,
-        url: t.magnet,
-        behaviorHints: { notWebReady: true }
+        url: `${BASE_URL}/${rdKey}/rd/${encodeURIComponent(t.magnet)}`,
+        behaviorHints: { bingeGroup: 'anime-nyaa-rd' }
       };
-    });
+    }
+    return {
+      name: '🧲 Nyaa Magnet',
+      title: `${t.name}\n👥 ${t.seeders || 0} seeders | 📦 ${t.filesize || '?'}`,
+      url: t.magnet,
+      behaviorHints: { notWebReady: true }
+    };
+  });
 
-    return { streams };
-  } catch (err) {
-    console.error('Stream error:', err.message);
-    return { streams: [] };
-  }
+  return { streams };
 }
 
 // ============================================================
@@ -407,88 +369,32 @@ app.get('/', (req, res) => {
 });
 
 // ── MANIFEST ──────────────────────────────────────────────
-// Config is base64-encoded JSON: { rdKey: "..." }
-app.get('/:userConfig/manifest.json', (req, res) => {
-  try {
-    const configJson = Buffer.from(req.params.userConfig, 'base64').toString('utf8');
-    const config = JSON.parse(configJson);
-    console.log(`📄 Manifest for rdKey: ${config.rdKey ? config.rdKey.substring(0, 8) + '...' : 'none'}`);
-  } catch(e) {
-    console.log(`📄 Manifest (invalid config)`);
-  }
-
+app.get('/:rdKey/manifest.json', (req, res) => {
+  const rdKey = req.params.rdKey;
+  console.log(`📄 Manifest for rdKey: ${rdKey.substring(0, 8)}...`);
   res.json({
-    id: 'cz.anime.nyaa.anilist.rd',
-    version: '2.0.0',
-    name: '🎌 Anime Search',
-    description: 'Vyhledávání anime přes AniList + Nyaa torrenty + RealDebrid',
-    resources: ['catalog', 'meta', 'stream'],
+    id: 'cz.anime.nyaa.rd',
+    version: '3.0.0',
+    name: '🎌 Anime Nyaa',
+    description: 'Streamuje anime z Nyaa.si přes RealDebrid. Funguje s Cinemeta/Kitsu katalogy.',
+    resources: ['stream'],
     types: ['series', 'movie'],
-    catalogs: [
-      {
-        type: 'series',
-        id: 'anime-search',
-        name: 'Anime (Series)',
-        extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
-      },
-      {
-        type: 'movie',
-        id: 'anime-movies',
-        name: 'Anime (Filmy)',
-        extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }]
-      }
-    ],
-    idPrefixes: ['anilist:'],
+    catalogs: [],
+    idPrefixes: ['kitsu:', 'tt'],
     behaviorHints: { configurable: false, configurationRequired: false }
   });
 });
 
-// ── CATALOG ───────────────────────────────────────────────
-// Regex: captures everything after catalogId including extra path segments
-// e.g. /CONFIG/catalog/series/anime-search/search=Naruto.json
-app.get(/^\/([^\/]+)\/catalog\/([^\/]+)\/([^\/]+)\/(.+)$/, async (req, res) => {
-  try {
-    const configB64 = req.params[0];
-    const type = req.params[1];
-    const extraPath = req.params[3].replace(/\.json$/, '');
-
-    const config = JSON.parse(Buffer.from(configB64, 'base64').toString('utf8'));
-
-    // Parse extra params from path: "search=Naruto&skip=0"
-    const extra = {};
-    for (const pair of extraPath.split('&')) {
-      const eqIdx = pair.indexOf('=');
-      if (eqIdx === -1) continue;
-      extra[pair.slice(0, eqIdx)] = decodeURIComponent(pair.slice(eqIdx + 1));
-    }
-
-    const result = await handleCatalogRequest({ type, extra, config });
-    res.json(result);
-  } catch (err) {
-    console.error('Catalog route error:', err.message);
-    res.json({ metas: [] });
-  }
-});
-
-// ── META ──────────────────────────────────────────────────
-// e.g. /CONFIG/meta/series/anilist:12345.json
-app.get('/:userConfig/meta/:type/:id.json', async (req, res) => {
-  try {
-    const config = JSON.parse(Buffer.from(req.params.userConfig, 'base64').toString('utf8'));
-    const result = await handleMetaRequest({ type: req.params.type, id: req.params.id, config });
-    res.json(result);
-  } catch (err) {
-    console.error('Meta route error:', err.message);
-    res.json({ meta: null });
-  }
-});
-
 // ── STREAM ────────────────────────────────────────────────
-// e.g. /CONFIG/stream/series/anilist:12345:1.json
-app.get('/:userConfig/stream/:type/:id.json', async (req, res) => {
+// /rdKey/stream/series/kitsu:12345:1.json
+// /rdKey/stream/series/tt1234567:1:5.json
+app.get(/^\/([^\/]+)\/stream\/([^\/]+)\/(.+)\.json$/, async (req, res) => {
+  const rdKey = req.params[0];
+  const type = req.params[1];
+  const fullId = req.params[2];
+
   try {
-    const config = JSON.parse(Buffer.from(req.params.userConfig, 'base64').toString('utf8'));
-    const result = await handleStreamRequest({ type: req.params.type, id: req.params.id, config });
+    const result = await handleStreamRequest(type, fullId, rdKey);
     res.json(result);
   } catch (err) {
     console.error('Stream route error:', err.message);
@@ -497,20 +403,11 @@ app.get('/:userConfig/stream/:type/:id.json', async (req, res) => {
 });
 
 // ── REALDEBRID PROXY ──────────────────────────────────────
-// Uses rdKey directly (not from config) for simplicity in the proxy URL
 app.get('/:rdKey/rd/:magnet(*)', async (req, res) => {
-  const magnet = decodeURIComponent(req.params.magnet);
   const rdKey = req.params.rdKey;
-  // rdKey here is the raw RD key, not base64 config
-  // We detect it by checking if it's valid base64 JSON or a plain key
-  let actualKey = rdKey;
-  try {
-    const config = JSON.parse(Buffer.from(rdKey, 'base64').toString('utf8'));
-    if (config.rdKey) actualKey = config.rdKey;
-  } catch(e) { /* plain key, use as-is */ }
-
+  const magnet = decodeURIComponent(req.params.magnet);
   console.log('RD proxy: converting magnet...');
-  const stream = await getRDStream(magnet, actualKey);
+  const stream = await getRDStream(magnet, rdKey);
   stream ? res.redirect(stream) : res.status(500).send('RealDebrid: Failed');
 });
 
@@ -524,5 +421,5 @@ setInterval(async () => {
 // ── START ─────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`✅ Server: ${BASE_URL}`);
-  console.log(`📦 Install: stremio://${BASE_URL.replace(/^https?:\/\//, '')}/CONFIG_BASE64/manifest.json`);
+  console.log(`📦 Install: stremio://${BASE_URL.replace(/^https?:\/\//, '')}/YOUR_RD_KEY/manifest.json`);
 });
