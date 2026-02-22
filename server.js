@@ -240,35 +240,36 @@ async function searchNyaaForName(animeName, episode, season = 1) {
     const epPad = String(ep).padStart(2, '0');
     filtered = allTorrents.filter(t => {
       const name = t.name || '';
-      // Must contain the episode number in a recognizable pattern
-      // Matches: " - 03", "[03]", "E03", "EP03", " 03 ", "_03_" etc.
-      // V2/V3 versions: "03v2", "03V3" are still ep 03
-      const sep = '(?:[-_ \\[\\(E]|ep)';
-      const end = '(?:v\\d)?(?:[ \\-_.\\]\\)]|$)';
-      const epPattern = new RegExp(sep + '0*' + ep + end, 'i');
-      const epPadPattern = new RegExp(sep + epPad + end, 'i');
-      return epPattern.test(name) || epPadPattern.test(name);
+      // Normalize name: replace separators with space for easier matching
+      const norm = name.replace(/[\[\]\(\)_.\-]/g, ' ').replace(/\s+/g, ' ');
+      // Look for episode number surrounded by spaces (handles " 01 ", " E01 ", " EP01 ")
+      // Pad to 2 digits for matching
+      const normLower = norm.toLowerCase();
+      const p = epPad;
+      return normLower.includes(' ' + p + ' ')
+          || normLower.includes(' ' + p + 'v')
+          || normLower.includes('e' + p + ' ')
+          || normLower.includes('ep' + p + ' ')
+          || normLower.trimEnd().endsWith(' ' + p)
+          || normLower.trimEnd().endsWith('e' + p);
     });
   }
 
   // Filter out wrong seasons
   if (season != null) {
-    const wrongSeasonPatterns = [];
-    for (let s = 1; s <= 20; s++) {
-      if (s === season) continue;
-      const sPad = String(s).padStart(2, '0');
-      // S02E, S2E
-      wrongSeasonPatterns.push(new RegExp(`S0*${s}E`, 'i'));
-      // Season 2, Season2
-      wrongSeasonPatterns.push(new RegExp(`Season\s*${s}(?!\d)`, 'i'));
-      // 2nd Season, 3rd Season, 4th Season...
-      if (s === 2) wrongSeasonPatterns.push(/2nd\s*Season/i);
-      else if (s === 3) wrongSeasonPatterns.push(/3rd\s*Season/i);
-      else if (s >= 4) wrongSeasonPatterns.push(new RegExp(`${s}th\s*Season`, 'i'));
-    }
     filtered = filtered.filter(t => {
       const name = t.name || '';
-      return !wrongSeasonPatterns.some(p => p.test(name));
+      // Reject any explicit season marker that isn't our season
+      // Matches: S2, S02, S2E01, S02E01
+      const sMatch = name.match(/\bS(\d+)(?:E|\b)/i);
+      if (sMatch && parseInt(sMatch[1]) !== season) return false;
+      // Reject: Season 2, Season2
+      const seasonMatch = name.match(/\bSeason\s*(\d+)/i);
+      if (seasonMatch && parseInt(seasonMatch[1]) !== season) return false;
+      // Reject ordinal: 2nd Season, 3rd Season
+      if (season !== 2 && /\b2nd\s*Season\b/i.test(name)) return false;
+      if (season !== 3 && /\b3rd\s*Season\b/i.test(name)) return false;
+      return true;
     });
   }
 
