@@ -243,19 +243,16 @@ async function searchNyaaForName(animeName, episode, season = 1) {
   // Filter out wrong seasons
   // e.g. if we want S1, reject torrents with S02/2nd Season/Season 2 etc.
   if (season != null) {
-    const wrongSeasons = [];
+    const allWrongPatterns = [];
     for (let s = 1; s <= 20; s++) {
       if (s !== season) {
-        wrongSeasons.push(
-          new RegExp(`S0*${s}E`, 'i'),           // S02E01
-          new RegExp(`Season\\s*${s}(?!\\d)`, 'i'), // Season 2
-          s === 2 ? /2nd\s*Season/i : null,
-          s === 3 ? /3rd\s*Season/i : null,
-          s >= 4 ? new RegExp(`${s}th\\s*Season`, 'i') : null,
-        ).filter(Boolean);
+        allWrongPatterns.push(new RegExp(`S0*${s}E`, 'i'));
+        allWrongPatterns.push(new RegExp(`Season\s*${s}(?!\d)`, 'i'));
+        if (s === 2) allWrongPatterns.push(/2nd\s*Season/i);
+        if (s === 3) allWrongPatterns.push(/3rd\s*Season/i);
+        if (s >= 4) allWrongPatterns.push(new RegExp(`${s}th\s*Season`, 'i'));
       }
     }
-    const allWrongPatterns = wrongSeasons.flat();
     filtered = filtered.filter(t => {
       const name = t.name || '';
       return !allWrongPatterns.some(p => p.test(name));
