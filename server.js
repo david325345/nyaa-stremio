@@ -329,22 +329,35 @@ async function searchNyaaForName(animeName, episode, season = 1) {
   return sorted;
 }
 
-// Search Nyaa: try all names in order, return first that has results
+// Search Nyaa: try all names, always search all, merge and dedup results
+const MIN_RESULTS = 5; // if first name finds fewer than this, still try others
+
 async function searchNyaaAll(names, episode, season = 1) {
   const tried = new Set();
+  const seen = new Set();
+  const combined = [];
+
   for (const name of names) {
     if (!name || tried.has(name)) continue;
     tried.add(name);
     console.log(`Nyaa: Searching "${name}" ep${episode} season${season}`);
     const torrents = await searchNyaaForName(name, episode, season);
-    if (torrents.length) {
-      console.log(`Nyaa: ✅ Found ${torrents.length} results with "${name}"`);
-      return torrents;
+    console.log(`Nyaa: Found ${torrents.length} results with "${name}"`);
+
+    for (const t of torrents) {
+      const hash = t.magnet?.match(/btih:([a-zA-Z0-9]+)/i)?.[1]?.toLowerCase();
+      if (hash && !seen.has(hash)) { seen.add(hash); combined.push(t); }
     }
-    console.log(`Nyaa: No results for "${name}", trying next...`);
+
+    // If we have enough results from first name, stop early
+    if (combined.length >= MIN_RESULTS && tried.size === 1) {
+      console.log(`Nyaa: ${combined.length} results from primary name, also trying fallbacks...`);
+    }
   }
-  console.log(`Nyaa: No results for any name variant`);
-  return [];
+
+  const sorted = combined.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
+  console.log(`Nyaa: total ${sorted.length} unique torrents from all names`);
+  return sorted;
 }
 
 // ============================================================
