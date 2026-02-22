@@ -332,6 +332,7 @@ async function handleStreamRequest(type, fullId, rdKey) {
 
   // Search Nyaa across all name variants
   const torrents = await searchNyaaAll(names, episode);
+  console.log(`Nyaa: total ${torrents.length} torrents after dedup`);
 
   if (!torrents.length) {
     return { streams: [{ name: '⏳ Nenalezeno', title: `Ep ${episode} není na Nyaa.si\n${names[0]}`, url: 'https://nyaa.si', behaviorHints: { notWebReady: true } }] };
@@ -340,7 +341,7 @@ async function handleStreamRequest(type, fullId, rdKey) {
   const hasRD = rdKey && rdKey !== 'nord';
 
   // Show all found torrents - RD conversion happens ONLY when user clicks a specific stream
-  const streams = torrents.filter(t => t.magnet).slice(0, 15).map(t => {
+  const streams = torrents.filter(t => t.magnet).map(t => {
     // Detect if torrent title matches S1 pattern (no season number = season 1)
     const name = t.name || '';
     const hasSeasonTag = /S\d{2}|Season\s*\d/i.test(name);
