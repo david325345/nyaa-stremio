@@ -232,30 +232,46 @@ async function searchNyaaForName(animeName, episode, season = 1) {
   }
 
   let filtered = allTorrents;
+
   if (episode != null) {
     const ep = parseInt(episode);
+    const epPad = String(ep).padStart(2, '0');
     filtered = allTorrents.filter(t => {
-      const pattern = new RegExp(`(?:[-_\\s\\[\\(]|e(?:p(?:isode)?)?\\s*)0*${ep}(?:[\\s\\-_\\]\\)v]|$|\\D)`, 'i');
-      return pattern.test(t.name || '');
+      const name = t.name || '';
+      // Must contain the episode number in a recognizable pattern
+      // Matches: " - 03", "[03]", "E03", "EP03", " 03 ", "_03_" etc.
+      // V2/V3 versions: "03v2", "03V3" are still ep 03
+      const epPattern = new RegExp(
+        `(?:[-_\s\[\(E]|ep)0*${ep}(?:v\d)?(?:[\s\-_\]\)\.v]|$)`,
+        'i'
+      );
+      // Also accept zero-padded version
+      const epPadPattern = new RegExp(
+        `(?:[-_\s\[\(E]|ep)${epPad}(?:v\d)?(?:[\s\-_\]\)\.v]|$)`,
+        'i'
+      );
+      return epPattern.test(name) || epPadPattern.test(name);
     });
   }
 
   // Filter out wrong seasons
-  // e.g. if we want S1, reject torrents with S02/2nd Season/Season 2 etc.
   if (season != null) {
-    const allWrongPatterns = [];
+    const wrongSeasonPatterns = [];
     for (let s = 1; s <= 20; s++) {
-      if (s !== season) {
-        allWrongPatterns.push(new RegExp(`S0*${s}E`, 'i'));
-        allWrongPatterns.push(new RegExp(`Season\s*${s}(?!\d)`, 'i'));
-        if (s === 2) allWrongPatterns.push(/2nd\s*Season/i);
-        if (s === 3) allWrongPatterns.push(/3rd\s*Season/i);
-        if (s >= 4) allWrongPatterns.push(new RegExp(`${s}th\s*Season`, 'i'));
-      }
+      if (s === season) continue;
+      const sPad = String(s).padStart(2, '0');
+      // S02E, S2E
+      wrongSeasonPatterns.push(new RegExp(`S0*${s}E`, 'i'));
+      // Season 2, Season2
+      wrongSeasonPatterns.push(new RegExp(`Season\s*${s}(?!\d)`, 'i'));
+      // 2nd Season, 3rd Season, 4th Season...
+      if (s === 2) wrongSeasonPatterns.push(/2nd\s*Season/i);
+      else if (s === 3) wrongSeasonPatterns.push(/3rd\s*Season/i);
+      else if (s >= 4) wrongSeasonPatterns.push(new RegExp(`${s}th\s*Season`, 'i'));
     }
     filtered = filtered.filter(t => {
       const name = t.name || '';
-      return !allWrongPatterns.some(p => p.test(name));
+      return !wrongSeasonPatterns.some(p => p.test(name));
     });
   }
 
