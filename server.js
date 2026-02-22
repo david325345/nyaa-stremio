@@ -90,10 +90,10 @@ async function getNamesFromIMDb(type, imdbId) {
     // Step 2: search AniList with that name to get romaji + all variants
     const gql = `
       query ($search: String) {
-        Page(page: 1, perPage: 5) {
+        Page(page: 1, perPage: 10) {
           media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+            format
             title { romaji english native }
-            synonyms
             startDate { year }
           }
         }
@@ -108,7 +108,14 @@ async function getNamesFromIMDb(type, imdbId) {
       return { names: [name], year: null };
     }
 
-    const best = mediaList[0];
+    // Prefer TV series over movies when type=series, prefer exact format match
+    const isSeriesRequest = type === 'series';
+    const best = mediaList.find(m =>
+      isSeriesRequest ? (m.format === 'TV' || m.format === 'TV_SHORT') : m.format === 'MOVIE'
+    ) || mediaList[0];
+
+    console.log(`AniList: best match format=${best.format} title="${best.title?.romaji || best.title?.english}"`);
+
     const names = [
       best.title?.romaji,
       best.title?.english,
@@ -206,14 +213,17 @@ async function searchNyaaForName(animeName, episode) {
     return cached.data;
   }
 
+  // Search both with episode number AND just the name (catches batch packs, alternate naming)
   const variants = buildSearchVariants(animeName, episode);
-  console.log(`Nyaa: 🔍 ${variants.length} variants for "${animeName}" ep${episode}`);
+  const nameOnlyVariants = buildSearchVariants(animeName, null);
+  const allVariants = [...new Set([...variants, ...nameOnlyVariants])];
+  console.log(`Nyaa: 🔍 ${allVariants.length} variants for "${animeName}" ep${episode}`);
 
   const seenHashes = new Set();
   const allTorrents = [];
 
   const results = await Promise.allSettled(
-    variants.map(q => si.searchAll(q, { filter: 0, category: '1_2' }).catch(() => []))
+    allVariants.map(q => si.searchAll(q, { filter: 0, category: '1_2' }).catch(() => []))
   );
 
   for (const r of results) {
@@ -243,7 +253,7 @@ async function searchNyaaAll(names, episode) {
   console.log(`Nyaa: Searching ${names.length} name variants: ${names.slice(0, 3).join(', ')}`);
 
   const results = await Promise.allSettled(
-    names.slice(0, 4).map(name => searchNyaaForName(name, episode)) // top 4 names
+    names.map(name => searchNyaaForName(name, episode))
   );
 
   const seen = new Set();
@@ -330,18 +340,26 @@ async function handleStreamRequest(type, fullId, rdKey) {
   const hasRD = rdKey && rdKey !== 'nord';
 
   // Show all found torrents - RD conversion happens ONLY when user clicks a specific stream
-  const streams = torrents.filter(t => t.magnet).slice(0, 10).map(t => {
+  const streams = torrents.filter(t => t.magnet).slice(0, 15).map(t => {
+    // Detect if torrent title matches S1 pattern (no season number = season 1)
+    const name = t.name || '';
+    const hasSeasonTag = /S\d{2}|Season\s*\d/i.test(name);
+    const isS1implicit = !hasSeasonTag; // no season tag → likely S1
+    const seasonHint = isS1implicit ? ' [S1]' : '';
+
+    const title = `${t.name}${seasonHint}\n👥 ${t.seeders || 0} seeders | 📦 ${t.filesize || '?'}`;
+
     if (hasRD) {
       return {
         name: '🎌 RealDebrid',
-        title: `${t.name}\n👥 ${t.seeders || 0} seeders | 📦 ${t.filesize || '?'}`,
+        title,
         url: `${BASE_URL}/${rdKey}/rd/${encodeURIComponent(t.magnet)}`,
         behaviorHints: { bingeGroup: 'anime-nyaa-rd' }
       };
     }
     return {
       name: '🧲 Nyaa Magnet',
-      title: `${t.name}\n👥 ${t.seeders || 0} seeders | 📦 ${t.filesize || '?'}`,
+      title,
       url: t.magnet,
       behaviorHints: { notWebReady: true }
     };
