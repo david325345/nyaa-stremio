@@ -231,7 +231,9 @@ async function searchNyaaForName(animeName, episode, season = 1) {
     }
   }
 
-  let filtered = allTorrents;
+  // Filter out junk torrents (Mini Anime, Recap, OVA, etc.)
+  const junkPattern = /mini anime|mini-anime|recap|\bova\b|\bspecial\b|ncop|nced|\bpv\b|preview|trailer/i;
+  let filtered = allTorrents.filter(t => !junkPattern.test(t.name || ''));
 
   if (episode != null) {
     const ep = parseInt(episode);
