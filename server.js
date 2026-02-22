@@ -291,18 +291,35 @@ async function searchNyaaForName(animeName, episode, season = 1) {
 
   // Filter out wrong seasons
   if (season != null) {
+    // Known arc/subtitle keywords that indicate S2+ of popular anime
+    // If we're looking for S1, reject these; if S2+ accept them
+    const s2plusKeywords = [
+      'entertainment district', 'mugen train', 'swordsmith',
+      'hashira training', 'infinity castle',
+      'phantom blood', 'battle tendency', 'stardust crusaders',
+      'diamond is unbreakable', 'golden wind', 'stone ocean',
+      'election arc', 'chimera ant', 'succession war',
+      'marineford', 'dressrosa', 'whole cake', 'wano',
+    ];
+
     filtered = filtered.filter(t => {
       const name = t.name || '';
-      // Reject any explicit season marker that isn't our season
-      // Matches: S2, S02, S2E01, S02E01
+      const nameLower = name.toLowerCase();
+
+      // Reject explicit wrong season markers
       const sMatch = name.match(/\bS(\d+)(?:E|\b)/i);
       if (sMatch && parseInt(sMatch[1]) !== season) return false;
-      // Reject: Season 2, Season2
       const seasonMatch = name.match(/\bSeason\s*(\d+)/i);
       if (seasonMatch && parseInt(seasonMatch[1]) !== season) return false;
-      // Reject ordinal: 2nd Season, 3rd Season
       if (season !== 2 && /\b2nd\s*Season\b/i.test(name)) return false;
       if (season !== 3 && /\b3rd\s*Season\b/i.test(name)) return false;
+      if (season !== 4 && /\b4th\s*Season\b/i.test(name)) return false;
+
+      // If looking for S1, reject torrents with known S2+ arc keywords
+      if (season === 1) {
+        if (s2plusKeywords.some(kw => nameLower.includes(kw))) return false;
+      }
+
       return true;
     });
   }
@@ -434,7 +451,7 @@ async function handleStreamRequest(type, fullId, rdKey) {
     });
 
   // Show all found torrents - RD conversion happens ONLY when user clicks a specific stream
-  const streams = sorted.map(t => {
+  const streams = sorted.slice(0, 20).map(t => {
     // Detect if torrent title matches S1 pattern (no season number = season 1)
     const name = t.name || '';
     const hasSeasonTag = /S\d{2}|Season\s*\d/i.test(name);
