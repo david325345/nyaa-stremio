@@ -162,21 +162,25 @@ async function resolveAnimeNames(type, fullId) {
   return result;
 }
 
-// Parse episode number from Stremio ID
-// kitsu:12345:5 → episode 5
-// tt1234567:1:5 → season 1 episode 5
-// tt1234567:5 → episode 5
-function parseEpisode(fullId) {
+// Parse episode and season from Stremio ID
+// kitsu:12345:5        → season 1, episode 5
+// tt1234567:1:5        → season 1, episode 5
+// tt1234567:2:5        → season 2, episode 5
+function parseEpisodeAndSeason(fullId) {
   const parts = fullId.split(':');
   if (fullId.startsWith('kitsu:')) {
-    // kitsu:ID:episode
-    return parseInt(parts[2]) || 1;
+    return { season: 1, episode: parseInt(parts[2]) || 1 };
   } else {
-    // tt:season:episode  OR  tt:episode
-    if (parts.length >= 3) return parseInt(parts[parts.length - 1]) || 1;
-    if (parts.length === 2) return parseInt(parts[1]) || 1;
-    return 1;
+    if (parts.length >= 3) {
+      return { season: parseInt(parts[1]) || 1, episode: parseInt(parts[2]) || 1 };
+    }
+    return { season: 1, episode: parseInt(parts[1]) || 1 };
   }
+}
+
+// Keep old name for compatibility
+function parseEpisode(fullId) {
+  return parseEpisodeAndSeason(fullId).episode;
 }
 
 // ============================================================
@@ -198,8 +202,8 @@ function buildSearchVariants(animeName, episode) {
   return base;
 }
 
-async function searchNyaaForName(animeName, episode) {
-  const cacheKey = `nyaa:${animeName}:${episode}`;
+async function searchNyaaForName(animeName, episode, season = 1) {
+  const cacheKey = `nyaa:${animeName}:${episode}:s${season}`;
   const cached = nyaaCache.get(cacheKey);
   if (isCacheValid(cached, NYAA_CACHE_TTL)) {
     console.log(`Nyaa: ✅ Cache hit "${animeName}" ep${episode}`);
@@ -236,20 +240,42 @@ async function searchNyaaForName(animeName, episode) {
     });
   }
 
+  // Filter out wrong seasons
+  // e.g. if we want S1, reject torrents with S02/2nd Season/Season 2 etc.
+  if (season != null) {
+    const wrongSeasons = [];
+    for (let s = 1; s <= 20; s++) {
+      if (s !== season) {
+        wrongSeasons.push(
+          new RegExp(`S0*${s}E`, 'i'),           // S02E01
+          new RegExp(`Season\\s*${s}(?!\\d)`, 'i'), // Season 2
+          s === 2 ? /2nd\s*Season/i : null,
+          s === 3 ? /3rd\s*Season/i : null,
+          s >= 4 ? new RegExp(`${s}th\\s*Season`, 'i') : null,
+        ).filter(Boolean);
+      }
+    }
+    const allWrongPatterns = wrongSeasons.flat();
+    filtered = filtered.filter(t => {
+      const name = t.name || '';
+      return !allWrongPatterns.some(p => p.test(name));
+    });
+  }
+
   const sorted = filtered.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
   nyaaCache.set(cacheKey, { data: sorted, timestamp: Date.now() });
   return sorted;
 }
 
 // Search Nyaa: romaji first, fallback to english if nothing found
-async function searchNyaaAll(names, episode) {
+async function searchNyaaAll(names, episode, season = 1) {
   // names[0] = romaji, names[1] = english (from AniList/Kitsu order)
   const romaji = names[0] || null;
   const english = names[1] || null;
 
   if (romaji) {
-    console.log(`Nyaa: Searching romaji "${romaji}" ep${episode}`);
-    const torrents = await searchNyaaForName(romaji, episode);
+    console.log(`Nyaa: Searching romaji "${romaji}" ep${episode} season${season}`);
+    const torrents = await searchNyaaForName(romaji, episode, season);
     if (torrents.length) {
       console.log(`Nyaa: ✅ Found ${torrents.length} results with romaji`);
       return torrents;
@@ -258,8 +284,8 @@ async function searchNyaaAll(names, episode) {
   }
 
   if (english && english !== romaji) {
-    console.log(`Nyaa: Searching english "${english}" ep${episode}`);
-    const torrents = await searchNyaaForName(english, episode);
+    console.log(`Nyaa: Searching english "${english}" ep${episode} season${season}`);
+    const torrents = await searchNyaaForName(english, episode, season);
     if (torrents.length) {
       console.log(`Nyaa: ✅ Found ${torrents.length} results with english`);
       return torrents;
@@ -319,8 +345,8 @@ async function getRDStream(magnet, apiKey) {
 async function handleStreamRequest(type, fullId, rdKey) {
   console.log(`=== STREAM REQUEST === type=${type} id=${fullId}`);
 
-  const episode = parseEpisode(fullId);
-  console.log(`Parsed episode: ${episode}`);
+  const { season, episode } = parseEpisodeAndSeason(fullId);
+  console.log(`Parsed season: ${season} episode: ${episode}`);
 
   // Resolve anime names from ID
   const { names, year } = await resolveAnimeNames(type, fullId);
@@ -332,7 +358,7 @@ async function handleStreamRequest(type, fullId, rdKey) {
   console.log(`Resolved names: ${JSON.stringify(names)}`);
 
   // Search Nyaa across all name variants
-  const torrents = await searchNyaaAll(names, episode);
+  const torrents = await searchNyaaAll(names, episode, season);
   console.log(`Nyaa: total ${torrents.length} torrents after dedup`);
 
   if (!torrents.length) {
@@ -341,8 +367,35 @@ async function handleStreamRequest(type, fullId, rdKey) {
 
   const hasRD = rdKey && rdKey !== 'nord';
 
+  // Preferred release groups in order
+  const GROUP_PRIORITY = ['SubsPlease', 'Erai-raws', 'EMBER', 'ASW'];
+
+  function getGroupPriority(torrentName) {
+    const name = torrentName || '';
+    for (let i = 0; i < GROUP_PRIORITY.length; i++) {
+      if (name.toLowerCase().includes(GROUP_PRIORITY[i].toLowerCase())) return i;
+    }
+    return GROUP_PRIORITY.length;
+  }
+
+  function is1080p(torrentName) {
+    return /1080p/i.test(torrentName || '');
+  }
+
+  const sorted = torrents
+    .filter(t => t.magnet && (t.seeders || 0) > 0)
+    .sort((a, b) => {
+      const a1080 = is1080p(a.name) ? 0 : 1;
+      const b1080 = is1080p(b.name) ? 0 : 1;
+      if (a1080 !== b1080) return a1080 - b1080;  // 1080p first
+      const pa = getGroupPriority(a.name);
+      const pb = getGroupPriority(b.name);
+      if (pa !== pb) return pa - pb;               // then preferred group
+      return (b.seeders || 0) - (a.seeders || 0); // then seeders
+    });
+
   // Show all found torrents - RD conversion happens ONLY when user clicks a specific stream
-  const streams = torrents.filter(t => t.magnet && (t.seeders || 0) > 0).map(t => {
+  const streams = sorted.map(t => {
     // Detect if torrent title matches S1 pattern (no season number = season 1)
     const name = t.name || '';
     const hasSeasonTag = /S\d{2}|Season\s*\d/i.test(name);
