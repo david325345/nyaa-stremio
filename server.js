@@ -538,7 +538,7 @@ app.get('/:rdKey/manifest.json', (req, res) => {
   const rdKey = req.params.rdKey;
   console.log(`📄 Manifest for rdKey: ${rdKey.substring(0, 8)}...`);
   res.json({
-    id: 'cz.anime.nyaa.rd',
+    id: 'cz.anime.nyaa.rd.v2',
     version: '3.0.0',
     name: '🎌 Anime Nyaa',
     description: 'Streamuje anime z Nyaa.si přes RealDebrid. Funguje s Cinemeta/Kitsu katalogy.',
