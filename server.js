@@ -114,8 +114,11 @@ async function getNamesFromIMDb(type, imdbId) {
       best.title?.english,
     ].filter(n => n && isLatinScript(n) && !isJunkTitle(n));
 
-    console.log(`AniList: resolved ${names.length} name variants for "${name}"`);
-    return { names: [...new Set(names)], year: best.startDate?.year || null };
+    // Fallback: if filters removed everything, use the Cinemeta name directly
+    const finalNames = names.length ? names : [name];
+
+    console.log(`AniList: resolved names=${JSON.stringify(finalNames)} for "${name}"`);
+    return { names: [...new Set(finalNames)], year: best.startDate?.year || null };
   } catch (err) {
     console.error('IMDb→AniList error:', err.message);
     return { names: [], year: null };
@@ -147,9 +150,8 @@ async function resolveAnimeNames(type, fullId) {
     result = await getNamesFromIMDb(type, baseId);
   }
 
-  if (result.names.length) {
-    nameCache.set(cacheKey, { data: result, timestamp: Date.now() });
-  }
+  // Always cache, even empty (but with short TTL if empty to allow retry)
+  nameCache.set(cacheKey, { data: result, timestamp: result.names.length ? Date.now() : Date.now() - NAME_CACHE_TTL + 60000 });
   return result;
 }
 
@@ -414,6 +416,10 @@ app.get('/:rdKey/rd/:magnet(*)', async (req, res) => {
   const stream = await getRDStream(magnet, rdKey);
   stream ? res.redirect(stream) : res.status(500).send('RealDebrid: Failed');
 });
+
+// Clear name cache on startup (filters may have changed between deploys)
+nameCache.clear();
+console.log('🗑️  Name cache cleared on startup');
 
 // ── KEEP-ALIVE ────────────────────────────────────────────
 setInterval(async () => {
