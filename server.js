@@ -42,6 +42,20 @@ cron.schedule('*/30 * * * *', () => {
 // NAME RESOLVERS
 // ============================================================
 
+// ============================================================
+// TITLE HELPERS
+// ============================================================
+
+// Only latin script (no Japanese/Chinese/Korean)
+function isLatinScript(str) {
+  return /^[\x00-\x7F\u00C0-\u024F\u1E00-\u1EFF\s\-:!?.'&]+$/.test(str);
+}
+
+// Filter out junk titles: Mini Anime, Recap, Special, OVA, PV, etc.
+function isJunkTitle(str) {
+  return /mini anime|recap|ova|special|pv|promo|preview|part \d|●|\?\?/i.test(str);
+}
+
 // Kitsu ID → names
 async function getNamesFromKitsu(kitsuId) {
   try {
@@ -49,16 +63,15 @@ async function getNamesFromKitsu(kitsuId) {
     const attrs = res.data?.data?.attributes;
     if (!attrs) return { names: [], year: null };
 
-    const names = [];
-    if (attrs.canonicalTitle) names.push(attrs.canonicalTitle);
-    if (attrs.titles?.en) names.push(attrs.titles.en);
-    if (attrs.titles?.en_jp) names.push(attrs.titles.en_jp);
-    if (attrs.titles?.ja_jp) names.push(attrs.titles.ja_jp);
-    if (attrs.abbreviatedTitles) names.push(...attrs.abbreviatedTitles);
+    const names = [
+      attrs.titles?.en_jp,   // romaji
+      attrs.titles?.en,      // english
+      attrs.canonicalTitle,
+    ].filter(n => n && isLatinScript(n) && !isJunkTitle(n));
 
     const year = attrs.startDate ? parseInt(attrs.startDate.substring(0, 4)) : null;
     console.log(`Kitsu: names=${JSON.stringify(names)} year=${year}`);
-    return { names: [...new Set(names.filter(Boolean))], year };
+    return { names: [...new Set(names)], year };
   } catch (err) {
     console.error('Kitsu error:', err.message);
     return { names: [], year: null };
@@ -99,9 +112,7 @@ async function getNamesFromIMDb(type, imdbId) {
     const names = [
       best.title?.romaji,
       best.title?.english,
-      name,
-      ...(best.synonyms || [])
-    ].filter(Boolean);
+    ].filter(n => n && isLatinScript(n) && !isJunkTitle(n));
 
     console.log(`AniList: resolved ${names.length} name variants for "${name}"`);
     return { names: [...new Set(names)], year: best.startDate?.year || null };
